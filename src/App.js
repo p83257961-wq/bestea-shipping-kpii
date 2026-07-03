@@ -8,12 +8,40 @@ import React, {
 
 /* ─────────────────────────────────────────────
    BESTEA 出貨暨庫存管理 KPI 試算工具
-   v3.2 — 合併版
-   主要變更（相對 v3.0）：
-   1. 第一階梯懲罰調緩：48→52 / 36→42 / 22→28 / 10→14
-   2. 新增「出貨包裝硬性否決條款」：該項得 0 分（錯誤率 ≥0.5%）
-      → 整月獎金歸零，不受其他項目影響
-   3. 否決原因與「未達 40 分門檻」分開顯示
+   v3.4 — 嚴格校準版（依老闆回饋調整）
+   相對 v3.3 的變更：
+
+   【制度面】
+   1. 庫存管理穩定度恢復硬門檻：盤點差異 ≥1 件 或 觸發事故 → 0 分
+      （盤點是月底單一事件，不存在「當月後續誘因」問題，硬門檻合理）
+   2. 訂單履行時效（漏寄=收單未出貨，重大疏失）加重：
+      0件=25 / 1件=10 / ≥2件=0
+      並新增硬性否決：單月漏寄 ≥3 件 → 整月獎金歸零（與①否決同級）
+   3. 出貨包裝正確率階梯加嚴（取 v3.0 與 v3.2 中間值）：
+      52→50 / 42→40 / 28→25 / 14→12；0% 滿分與 ≥0.5% 否決不變
+   4. 40 分門檻、品質穩定月 ×1.2（上限120）維持不變
+
+   【UI/UX 面】承襲 v3.3 全部修正
+   （RWD 單欄、浮窗點外關閉、精確分帳、初載不誤報已儲存、
+     防負值輸入、aria-label 無障礙）
+
+   v3.5 — ② 改比率制（老闆定案：②隨單量長大、③固定）：
+   - 訂單履行時效改為與①相同的比率制，基準 max(訂單量, 1000) 筆：
+     0% = 25 / ≤0.1% = 10 / ≤0.2% = 0 / >0.2% = 整月否決
+     （600 單時行為與 v3.4 完全相同：1件=10、2件歸零、3件否決；
+       單量成長後容錯件數等比放大，如 2000 單 → 3件歸零、5件否決）
+   - 庫存管理穩定度維持固定件數硬門檻不變
+
+   v3.4.1 內容補充（計分數字不變）：
+   - 三大項「計分範圍」補齊漏列樣態：
+     ① 補：贈品/加購品漏放、發票明細錯誤、禮盒提袋卡片漏附、
+           包裝不良致運送毀損、效期批號錯誤
+     ② 補：逾時出貨（超過承諾時限）、物流單號未回填、
+           補寄/換貨逾時、平台（蝦皮）逾期出貨
+     ③ 補：入庫驗收未核對、效期疏失（未先進先出）；
+           事故定義補「安全庫存未通報致斷貨」
+   - 新增「計件認定原則」說明卡（同單多錯計1件、以發現月計、
+     作業無誤之客訴不計）
    ───────────────────────────────────────────── */
 
 // ── Icons (inline SVG) ──
@@ -58,18 +86,32 @@ const Icons = {
 };
 
 // ── 比率制門檻（以每 1,000 筆為基準） ──
-// 合併「出貨正確率 + 包裝客訴」= 55 分（原 35 + 20）
-// v3.2：第一階梯懲罰調緩 → 48→52 / 36→42 / 22→28 / 10→14
+// 合併「出貨正確率 + 包裝客訴」= 55 分
 const RATE_THRESHOLDS = {
   fulfillmentQuality: [
     { maxRate: 0, score: 55, label: "0%（0 件）" },
-    { maxRate: 0.001, score: 52, label: "0.1%（1 件 / 1000）" },
-    { maxRate: 0.002, score: 42, label: "0.2%（2 件 / 1000）" },
-    { maxRate: 0.003, score: 28, label: "0.3%（3 件 / 1000）" },
-    { maxRate: 0.004, score: 14, label: "0.4%（4 件 / 1000）" },
+    { maxRate: 0.001, score: 50, label: "0.1%（1 件 / 1000）" },
+    { maxRate: 0.002, score: 40, label: "0.2%（2 件 / 1000）" },
+    { maxRate: 0.003, score: 25, label: "0.3%（3 件 / 1000）" },
+    { maxRate: 0.004, score: 12, label: "0.4%（4 件 / 1000）" },
     { maxRate: Infinity, score: 0, label: "≥0.5%（5 件 / 1000）" },
   ],
+  // 訂單履行（漏寄）：比率制，隨單量等比放大
+  fulfillment: [
+    { maxRate: 0, score: 25, label: "0%（0 件）" },
+    { maxRate: 0.001, score: 10, label: "0.1%（1 件 / 1000）" },
+    { maxRate: Infinity, score: 0, label: "0.2%（2 件 / 1000）" },
+  ],
 };
+
+// 漏寄率超過此值 → 整月獎金否決（收單未出貨屬重大疏失）
+const FULFILLMENT_VETO_RATE = 0.002;
+
+// ── 庫存管理：硬門檻（盤點差異 ≥1 件即 0 分） ──
+const INVENTORY_TIERS = [
+  { maxCount: 0, score: 20, label: "0 件（無差異）" },
+  { maxCount: Infinity, score: 0, label: "≥1 件" },
+];
 
 // ── 比率制計分函式 ──
 function scoreByRate(errorCount, orderCount, thresholds) {
@@ -82,35 +124,72 @@ function scoreByRate(errorCount, orderCount, thresholds) {
   return 0;
 }
 
-// ── 計算實際歸零所需件數（用於提示） ──
-function calculateThresholdCounts(orderCount) {
+// ── 件數階梯計分函式 ──
+function scoreByCount(count, tiers) {
+  for (const tier of tiers) {
+    if (count <= tier.maxCount) return tier.score;
+  }
+  return 0;
+}
+
+// ── 超過某比率門檻所需的最少件數（用於動態提示） ──
+function countToExceedRate(orderCount, rate) {
   const baseOrders = Math.max(orderCount, 1000);
-  return {
-    fq_full: 0,
-    fq_52: Math.floor(baseOrders * 0.001),
-    fq_42: Math.floor(baseOrders * 0.002),
-    fq_28: Math.floor(baseOrders * 0.003),
-    fq_14: Math.floor(baseOrders * 0.004),
-    fq_zero: Math.floor(baseOrders * 0.004) + 1,
-  };
+  return Math.floor(baseOrders * rate) + 1;
+}
+
+// ── 精確分帳：各人金額加總必等於 total ──
+function splitByWeights(total, weights) {
+  const sum = weights.reduce((a, b) => a + b, 0);
+  const raw = weights.map((w) => (total * w) / sum);
+  const base = raw.map(Math.floor);
+  let remainder = total - base.reduce((a, b) => a + b, 0);
+  const order = raw
+    .map((v, i) => ({ i, frac: v - base[i] }))
+    .sort((a, b) => b.frac - a.frac);
+  for (const { i } of order) {
+    if (remainder <= 0) break;
+    base[i] += 1;
+    remainder -= 1;
+  }
+  return base;
 }
 
 // ── Tooltip 規則組 ──
-const STATIC_RULES = {
-  fulfillment: [
-    { range: "0 件", score: 25, color: "#22c55e" },
-    { range: "≥1 件", score: 0, color: "#ef4444" },
-  ],
-  inventory: [
-    { range: "0 件（無事故）", score: 20, color: "#22c55e" },
-    { range: "≥1 件 或 事故", score: 0, color: "#ef4444" },
-  ],
-};
+const tierColor = (score, max) =>
+  score === max
+    ? "#22c55e"
+    : score >= max * 0.5
+    ? "#eab308"
+    : score > 0
+    ? "#f97316"
+    : "#ef4444";
+
+const FULFILLMENT_RULES = [
+  { range: "0%（0 件）", score: 25, color: "#22c55e" },
+  { range: "0.1%（1 件 / 1000）", score: 10, color: "#f97316" },
+  { range: "0.2%（2 件 / 1000）", score: 0, color: "#ef4444" },
+  {
+    range: ">0.2%（≥3 件 / 1000）",
+    scoreText: "整月否決",
+    color: "#ef4444",
+  },
+];
+
+const INVENTORY_RULES = [
+  ...INVENTORY_TIERS.map((t) => ({
+    range: t.label,
+    score: t.score,
+    color: tierColor(t.score, 20),
+  })),
+  { range: "觸發營運事故", score: 0, color: "#ef4444" },
+];
 
 const RuleTooltip = ({ rules, isOpen, onToggle }) => (
   <div style={{ position: "relative", display: "inline-block" }}>
     <button
       onClick={onToggle}
+      aria-label="查看評分規則"
       style={{
         background: "none",
         border: "none",
@@ -123,51 +202,59 @@ const RuleTooltip = ({ rules, isOpen, onToggle }) => (
       <Icons.info />
     </button>
     {isOpen && (
-      <div
-        style={{
-          position: "absolute",
-          top: "100%",
-          left: "50%",
-          transform: "translateX(-50%)",
-          marginTop: 8,
-          background: "#1e293b",
-          color: "#e2e8f0",
-          borderRadius: 12,
-          padding: "12px 16px",
-          zIndex: 50,
-          minWidth: 220,
-          boxShadow: "0 20px 40px rgba(0,0,0,0.3)",
-          fontSize: 12,
-          lineHeight: 1.6,
-        }}
-      >
+      <>
+        {/* 點外部任意處關閉 */}
+        <div
+          onClick={onToggle}
+          style={{ position: "fixed", inset: 0, zIndex: 40 }}
+        />
         <div
           style={{
-            fontWeight: 700,
-            marginBottom: 6,
-            fontSize: 11,
-            color: "#94a3b8",
-            letterSpacing: "0.05em",
+            position: "absolute",
+            top: "100%",
+            left: "50%",
+            transform: "translateX(-50%)",
+            marginTop: 8,
+            background: "#1e293b",
+            color: "#e2e8f0",
+            borderRadius: 12,
+            padding: "12px 16px",
+            zIndex: 50,
+            minWidth: 220,
+            maxWidth: "calc(100vw - 32px)",
+            boxShadow: "0 20px 40px rgba(0,0,0,0.3)",
+            fontSize: 12,
+            lineHeight: 1.6,
           }}
         >
-          評分標準
-        </div>
-        {rules.map((r, i) => (
           <div
-            key={i}
             style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 16,
+              fontWeight: 700,
+              marginBottom: 6,
+              fontSize: 11,
+              color: "#94a3b8",
+              letterSpacing: "0.05em",
             }}
           >
-            <span>{r.range || r.label}</span>
-            <span style={{ fontWeight: 700, color: r.color || "#22c55e" }}>
-              {r.score} 分
-            </span>
+            評分標準
           </div>
-        ))}
-      </div>
+          {rules.map((r, i) => (
+            <div
+              key={i}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 16,
+              }}
+            >
+              <span>{r.range || r.label}</span>
+              <span style={{ fontWeight: 700, color: r.color || "#22c55e" }}>
+                {r.scoreText ? r.scoreText : `${r.score} 分`}
+              </span>
+            </div>
+          ))}
+        </div>
+      </>
     )}
   </div>
 );
@@ -192,6 +279,7 @@ const Stepper = ({ value, onChange, danger }) => {
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <button
         style={btnStyle}
+        aria-label="減少一件"
         onClick={() => onChange(Math.max(0, value - 1))}
       >
         −
@@ -208,7 +296,11 @@ const Stepper = ({ value, onChange, danger }) => {
       >
         {value}
       </span>
-      <button style={btnStyle} onClick={() => onChange(value + 1)}>
+      <button
+        style={btnStyle}
+        aria-label="增加一件"
+        onClick={() => onChange(value + 1)}
+      >
         +
       </button>
     </div>
@@ -299,6 +391,7 @@ export default function App() {
   );
   const [openTooltip, setOpenTooltip] = useState(null);
   const [showSaved, setShowSaved] = useState(false);
+  const firstRun = useRef(true);
 
   useEffect(() => {
     const data = {
@@ -311,6 +404,11 @@ export default function App() {
       inventoryIncident,
     };
     saveToDisk(data);
+    // 初次載入不顯示「已自動儲存」
+    if (firstRun.current) {
+      firstRun.current = false;
+      return;
+    }
     setShowSaved(true);
     const t = setTimeout(() => setShowSaved(false), 1500);
     return () => clearTimeout(t);
@@ -336,8 +434,16 @@ export default function App() {
     localStorage.removeItem(STORAGE_KEY);
   }, []);
 
-  const thresholdCounts = useMemo(
-    () => calculateThresholdCounts(orderCount),
+  const fqVetoCount = useMemo(
+    () => countToExceedRate(orderCount, 0.004),
+    [orderCount]
+  );
+  const fulfillZeroCount = useMemo(
+    () => countToExceedRate(orderCount, 0.001),
+    [orderCount]
+  );
+  const fulfillVetoCount = useMemo(
+    () => countToExceedRate(orderCount, FULFILLMENT_VETO_RATE),
     [orderCount]
   );
 
@@ -349,18 +455,34 @@ export default function App() {
       RATE_THRESHOLDS.fulfillmentQuality
     );
 
-    // ② 訂單履行時效（25分）— 維持 1 件歸零
-    const fulfillmentScore = fulfillmentErrors === 0 ? 25 : 0;
+    // ② 訂單履行時效（25分）— v3.5 比率制（隨單量放大）
+    const fulfillmentScore = scoreByRate(
+      fulfillmentErrors,
+      orderCount,
+      RATE_THRESHOLDS.fulfillment
+    );
 
-    // ③ 庫存管理穩定度（20分）— 維持 1 件歸零 + 事故條款
-    const inventoryScore =
-      !inventoryIncident && inventoryErrors === 0 ? 20 : 0;
+    // ③ 庫存管理穩定度（20分）— v3.3 階梯制 + 事故條款
+    const inventoryScore = inventoryIncident
+      ? 0
+      : scoreByCount(inventoryErrors, INVENTORY_TIERS);
 
     const rawTotalScore =
       fulfillmentQualityScore + fulfillmentScore + inventoryScore;
 
-    // 【v3.2】出貨包裝硬性否決：該項得 0 分（錯誤率 ≥0.5%）→ 整月獎金歸零
+    // 出貨包裝硬性否決：該項得 0 分（錯誤率 ≥0.5%）→ 整月獎金歸零
     const isFulfillmentQualityFailed = fulfillmentQualityScore === 0;
+
+    // 漏寄硬性否決：漏寄率 >0.2% → 整月獎金歸零
+    const isFulfillmentVetoed =
+      fulfillmentErrors / Math.max(orderCount, 1000) > FULFILLMENT_VETO_RATE;
+
+    // 否決原因（fq = 出貨包裝、fulfill = 漏寄）
+    const vetoReason = isFulfillmentQualityFailed
+      ? "fq"
+      : isFulfillmentVetoed
+      ? "fulfill"
+      : null;
 
     // 品質穩定月（全項目零錯誤）
     const isQualityMonth =
@@ -374,9 +496,9 @@ export default function App() {
       ? Math.min(rawTotalScore * 1.2, 120)
       : rawTotalScore;
 
-    // < 40 分 或 出貨包裝否決 → 獎金歸零
+    // < 40 分 或 觸發任一否決條款 → 獎金歸零
     const isBelowThreshold =
-      finalScore < MIN_THRESHOLD_SCORE || isFulfillmentQualityFailed;
+      finalScore < MIN_THRESHOLD_SCORE || vetoReason !== null;
 
     const bonusPool = Math.round(revenue * 0.001);
 
@@ -384,42 +506,36 @@ export default function App() {
       ? 0
       : Math.round(bonusPool * (finalScore / 100));
 
+    // 精確分帳：加總必等於 actualTotalBonus
+    const makeStaff = (labels, weights, ratios) => {
+      const amounts = splitByWeights(actualTotalBonus, weights);
+      return labels.map((label, i) => ({
+        label,
+        amount: amounts[i],
+        ratio: ratios[i],
+        weight: weights[i],
+      }));
+    };
+
     let staffDistribution = [];
     if (staffMode === "2_even") {
-      const per = Math.round(actualTotalBonus / 2);
-      staffDistribution = [
-        { label: "員工 A", amount: per, ratio: "50%", weight: 1 },
-        { label: "員工 B", amount: per, ratio: "50%", weight: 1 },
-      ];
+      staffDistribution = makeStaff(
+        ["員工 A", "員工 B"],
+        [1, 1],
+        ["50%", "50%"]
+      );
     } else if (staffMode === "3_even") {
-      const per = Math.round(actualTotalBonus / 3);
-      staffDistribution = [
-        { label: "員工 A", amount: per, ratio: "33.3%", weight: 1 },
-        { label: "員工 B", amount: per, ratio: "33.3%", weight: 1 },
-        { label: "員工 C", amount: per, ratio: "33.3%", weight: 1 },
-      ];
+      staffDistribution = makeStaff(
+        ["員工 A", "員工 B", "員工 C"],
+        [1, 1, 1],
+        ["33.3%", "33.3%", "33.3%"]
+      );
     } else if (staffMode === "3_weighted") {
-      const unit = actualTotalBonus / 5;
-      staffDistribution = [
-        {
-          label: "資深人員 A",
-          amount: Math.round(unit * 2),
-          ratio: "40%",
-          weight: 2,
-        },
-        {
-          label: "資深人員 B",
-          amount: Math.round(unit * 2),
-          ratio: "40%",
-          weight: 2,
-        },
-        {
-          label: "新進人員 C",
-          amount: Math.round(unit * 1),
-          ratio: "20%",
-          weight: 1,
-        },
-      ];
+      staffDistribution = makeStaff(
+        ["資深人員 A", "資深人員 B", "新進人員 C"],
+        [2, 2, 1],
+        ["40%", "40%", "20%"]
+      );
     }
 
     return {
@@ -432,7 +548,7 @@ export default function App() {
       finalScore,
       isQualityMonth,
       isBelowThreshold,
-      isFulfillmentQualityFailed,
+      vetoReason,
       bonusPool,
       actualTotalBonus,
       staffDistribution,
@@ -472,6 +588,10 @@ export default function App() {
         input[type=number]::-webkit-inner-spin-button,
         input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
         input[type=number] { -moz-appearance: textfield; }
+        .main-grid { display: grid; grid-template-columns: 1fr 380px; gap: 24px; align-items: start; }
+        @media (max-width: 900px) {
+          .main-grid { grid-template-columns: 1fr; }
+        }
       `}</style>
 
       <div style={{ maxWidth: 1120, margin: "0 auto" }}>
@@ -503,7 +623,7 @@ export default function App() {
                 marginBottom: 12,
               }}
             >
-              <Icons.package /> BESTEA 內部管理 ・ v3.2
+              <Icons.package /> BESTEA 內部管理 ・ v3.5
             </div>
             <h1
               style={{
@@ -526,6 +646,7 @@ export default function App() {
                 display: "flex",
                 alignItems: "center",
                 gap: 10,
+                flexWrap: "wrap",
               }}
             >
               比率制 ・ 最低基準 1,000 筆 ・ 總分 {MIN_THRESHOLD_SCORE} 分為獎金門檻
@@ -592,8 +713,11 @@ export default function App() {
               </div>
               <input
                 type="number"
+                min="0"
                 value={revenue}
-                onChange={(e) => setRevenue(Number(e.target.value) || 0)}
+                onChange={(e) =>
+                  setRevenue(Math.max(0, Number(e.target.value) || 0))
+                }
                 style={{
                   fontSize: 22,
                   fontWeight: 800,
@@ -606,6 +730,16 @@ export default function App() {
                   fontVariantNumeric: "tabular-nums",
                 }}
               />
+              <div
+                style={{
+                  fontSize: 9,
+                  fontWeight: 600,
+                  color: "#94a3b8",
+                  marginTop: 2,
+                }}
+              >
+                NT$ {revenue.toLocaleString()}
+              </div>
             </div>
             <div style={{ width: 1, height: 40, background: "#e2e8f0" }} />
             <div>
@@ -622,8 +756,11 @@ export default function App() {
               </div>
               <input
                 type="number"
+                min="0"
                 value={orderCount}
-                onChange={(e) => setOrderCount(Number(e.target.value) || 0)}
+                onChange={(e) =>
+                  setOrderCount(Math.max(0, Number(e.target.value) || 0))
+                }
                 style={{
                   fontSize: 22,
                   fontWeight: 800,
@@ -677,14 +814,7 @@ export default function App() {
         </header>
 
         {/* MAIN GRID */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 380px",
-            gap: 24,
-            alignItems: "start",
-          }}
-        >
+        <div className="main-grid">
           {/* LEFT */}
           <div
             style={{
@@ -736,7 +866,7 @@ export default function App() {
                 {/* ① 出貨包裝正確率（合併版）— 比率制 */}
                 <KpiRow
                   title="出貨包裝正確率"
-                  subtitle="裝錯、少裝、多裝、貼錯標籤、缺漏、備註未看"
+                  subtitle="裝錯、少裝、多裝、貼錯標籤、缺漏、備註未看、贈品/加購品漏放、發票明細錯誤、禮盒提袋卡片漏附、包裝不良致運送毀損、效期批號錯誤"
                   weight={55}
                   score={results.scores.fulfillmentQualityScore}
                   maxScore={55}
@@ -748,9 +878,9 @@ export default function App() {
                     color:
                       r.score === 55
                         ? "#22c55e"
-                        : r.score >= 42
+                        : r.score >= 40
                         ? "#eab308"
-                        : r.score >= 14
+                        : r.score >= 12
                         ? "#f97316"
                         : "#ef4444",
                   }))}
@@ -759,7 +889,7 @@ export default function App() {
                   onToggleTooltip={() =>
                     setOpenTooltip(openTooltip === "fq" ? null : "fq")
                   }
-                  hint={`⚠ 否決 ≥${thresholdCounts.fq_zero} 件`}
+                  hint={`⚠ 否決 ≥${fqVetoCount} 件`}
                   hintColor="#dc2626"
                 />
 
@@ -771,16 +901,16 @@ export default function App() {
                   }}
                 />
 
-                {/* ② 訂單履行 */}
+                {/* ② 訂單履行 — v3.3 階梯制 */}
                 <KpiRow
                   title="訂單履行時效"
-                  subtitle="漏寄、誤放、遺漏處理件數"
+                  subtitle="漏寄（收單未出貨）、逾時出貨（超過承諾時限）、誤放、遺漏處理、物流單號未回填、補寄/換貨逾時、平台（蝦皮）逾期出貨"
                   weight={25}
                   score={results.scores.fulfillmentScore}
                   maxScore={25}
                   value={fulfillmentErrors}
                   onChange={setFulfillmentErrors}
-                  rules={STATIC_RULES.fulfillment}
+                  rules={FULFILLMENT_RULES}
                   openTooltip={openTooltip}
                   tooltipKey="fulfill"
                   onToggleTooltip={() =>
@@ -788,7 +918,7 @@ export default function App() {
                       openTooltip === "fulfill" ? null : "fulfill"
                     )
                   }
-                  hint="⚠ 1件即歸零"
+                  hint={`⚠ ${fulfillZeroCount}件歸零・${fulfillVetoCount}件否決`}
                   hintColor="#dc2626"
                 />
 
@@ -800,22 +930,22 @@ export default function App() {
                   }}
                 />
 
-                {/* ③ 庫存管理 */}
+                {/* ③ 庫存管理 — v3.3 階梯制 */}
                 <KpiRow
                   title="庫存管理穩定度"
-                  subtitle="盤點帳貨差異件數"
+                  subtitle="盤點帳貨差異、入庫驗收未核對、效期疏失（未先進先出/過期短效未回報）"
                   weight={20}
                   score={results.scores.inventoryScore}
                   maxScore={20}
                   value={inventoryErrors}
                   onChange={setInventoryErrors}
-                  rules={STATIC_RULES.inventory}
+                  rules={INVENTORY_RULES}
                   openTooltip={openTooltip}
                   tooltipKey="inv"
                   onToggleTooltip={() =>
                     setOpenTooltip(openTooltip === "inv" ? null : "inv")
                   }
-                  hint="門檻制"
+                  hint="⚠ 1件/事故歸零"
                   hintColor="#dc2626"
                   extra={
                     <label
@@ -843,7 +973,7 @@ export default function App() {
                           cursor: "pointer",
                         }}
                       />
-                      觸發營運事故（缺貨延遲 / 取消）
+                      觸發營運事故（缺貨延遲 / 取消 / 安全庫存未通報致斷貨）
                     </label>
                   }
                 />
@@ -1066,8 +1196,10 @@ export default function App() {
                     }}
                   >
                     <Icons.ban />{" "}
-                    {results.isFulfillmentQualityFailed
+                    {results.vetoReason === "fq"
                       ? "出貨包裝否決"
+                      : results.vetoReason === "fulfill"
+                      ? "漏寄否決"
                       : `未達 ${MIN_THRESHOLD_SCORE} 分門檻`}
                   </div>
                 )}
@@ -1125,6 +1257,7 @@ export default function App() {
                 />
                 {/* 40 分門檻線 */}
                 <div
+                  title={`獎金門檻 ${MIN_THRESHOLD_SCORE} 分`}
                   style={{
                     position: "absolute",
                     top: -4,
@@ -1218,8 +1351,10 @@ export default function App() {
                     }}
                   >
                     <span>
-                      {results.isFulfillmentQualityFailed
+                      {results.vetoReason === "fq"
                         ? "出貨包裝正確率不及格"
+                        : results.vetoReason === "fulfill"
+                        ? `漏寄達 ${fulfillVetoCount} 件（重大疏失）`
                         : `未達 ${MIN_THRESHOLD_SCORE} 分門檻`}
                     </span>
                     <span>本月不發獎金</span>
@@ -1342,10 +1477,36 @@ export default function App() {
             <StatusAlert
               isQualityMonth={results.isQualityMonth}
               isBelowThreshold={results.isBelowThreshold}
-              isFulfillmentQualityFailed={results.isFulfillmentQualityFailed}
+              vetoReason={results.vetoReason}
               finalScore={results.finalScore}
               rawScore={results.rawTotalScore}
             />
+
+            <div
+              style={{
+                background: "#fffbeb",
+                borderRadius: 16,
+                border: "1px solid #fde68a",
+                padding: "14px 18px",
+                fontSize: 11,
+                color: "#92400e",
+                lineHeight: 1.8,
+              }}
+            >
+              <div
+                style={{
+                  fontWeight: 700,
+                  marginBottom: 4,
+                  color: "#78350f",
+                  fontSize: 12,
+                }}
+              >
+                計件認定原則
+              </div>
+              <div>同一筆訂單多項錯誤 → 以 1 件計，歸入最嚴重項目（不重複扣）</div>
+              <div>錯誤以「發現當月」計入該月 KPI，跨月客訴不回溯改分</div>
+              <div>作業無誤的客訴（口味偏好、物流延誤等非倉庫責任）不計件</div>
+            </div>
 
             <div
               style={{
@@ -1370,8 +1531,9 @@ export default function App() {
               </div>
               <div>獎金池 = 月營收 × 0.1%</div>
               <div>
-                出貨/包裝採比率制（基準 max(訂單量, 1000) 筆）
+                出貨包裝採比率制（基準 max(訂單量, 1000) 筆）
               </div>
+              <div>訂單履行採重罰階梯、庫存採硬門檻（點各項 ⓘ 查看）</div>
               <div>實際獎金 = 獎金池 × (KPI得分 ÷ 100)</div>
               <div>品質穩定月 = 全項目零錯誤 → 得分 ×1.2（上限120）</div>
               <div style={{ color: "#dc2626", fontWeight: 600 }}>
@@ -1379,6 +1541,9 @@ export default function App() {
               </div>
               <div style={{ color: "#dc2626", fontWeight: 600 }}>
                 出貨包裝得 0 分（≥0.5%）→ 整月否決，不發獎金
+              </div>
+              <div style={{ color: "#dc2626", fontWeight: 600 }}>
+                漏寄率 &gt;0.2% → 整月否決（本月基準 ≥{fulfillVetoCount} 件）
               </div>
             </div>
           </div>
@@ -1486,7 +1651,7 @@ function KpiRow({
 function StatusAlert({
   isQualityMonth,
   isBelowThreshold,
-  isFulfillmentQualityFailed,
+  vetoReason,
   finalScore,
   rawScore,
 }) {
@@ -1508,8 +1673,10 @@ function StatusAlert({
         </div>
         <div>
           <div style={{ fontWeight: 700, fontSize: 13, color: "#1f2937" }}>
-            {isFulfillmentQualityFailed
+            {vetoReason === "fq"
               ? "出貨包裝否決：本月不發獎金"
+              : vetoReason === "fulfill"
+              ? "漏寄否決：本月不發獎金"
               : "未達獎金門檻"}
           </div>
           <div
@@ -1520,8 +1687,10 @@ function StatusAlert({
               lineHeight: 1.6,
             }}
           >
-            {isFulfillmentQualityFailed
+            {vetoReason === "fq"
               ? `出貨包裝正確率錯誤率達 ≥0.5%（核心職責不及格），依否決條款本月不發 KPI 獎金，無論其他項目得分。建議立即召開檢討會議找出根因。`
+              : vetoReason === "fulfill"
+              ? `單月漏寄率超過 0.2%（每 1,000 筆最多容忍 2 件）。收到訂單未出貨屬重大疏失，依否決條款本月不發 KPI 獎金，無論其他項目得分。建議立即檢討每日出貨核對流程。`
               : `本月得分 ${finalScore} 分，低於 ${MIN_THRESHOLD_SCORE} 分標準，本月不發 KPI 獎金。建議召開檢討會議找出根因。`}
           </div>
         </div>
